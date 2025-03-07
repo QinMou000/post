@@ -219,25 +219,135 @@ O_NONBLOCK enable（使用非阻塞模式）：立刻返回失败，错误码为
 
 ### system V 共享内存
 
+ 共享内存区是最快的IPC形式。一旦这样的内存映射到共享它的进程的地址空间，这些进程间数据传递不再涉及到内核，换句话说，进程不在通过调用进入内核的系统调用来传递数据
 
+![image-20250306211429284](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250306211429284.png)
 
+#### 共享内存数据结构`struct`
 
+在操作系统中不仅仅只有两个进程通过共享内存存相互通信，那么操作系统就必须要将这么多的共享内存管理起来。那么又是这个老生常谈的问题，**先描述再组织。**所以内核中组织共享内存的结构体就应运而生了。
 
+结构体里面记录了权限、大小、最后一次关联时间、最后一次改变时间、创建进程的`pid`、最后一个操作进程的`pid`等信息。
 
+```C++
+/* Obsolete, used only for backwards compatibility and libc5 compiles */
+struct shmid_ds {
+	struct ipc_perm		shm_perm;	/* operation perms */
+	int			shm_segsz;	/* size of segment (bytes) */
+	__kernel_time_t		shm_atime;	/* last attach time */
+	__kernel_time_t		shm_dtime;	/* last detach time */
+	__kernel_time_t		shm_ctime;	/* last change time */
+	__kernel_ipc_pid_t	shm_cpid;	/* pid of creator */
+	__kernel_ipc_pid_t	shm_lpid;	/* pid of last operator */
+	unsigned short		shm_nattch;	/* no. of current attaches */
+	unsigned short 		shm_unused;	/* compatibility */
+	void 			*shm_unused2;	/* ditto - used by DIPC */
+	void			*shm_unused3;	/* unused */
+};
+```
 
+#### 共享内存函数
 
+- `shmget`函数
 
+> 功能：用来创建共享内存
+>
+> 原型：
+>
+> ```C++
+> int shmget(key_t key, size_t size, int shmflg);
+> ```
+>
+> 参数：
+>
+> `key`：这个共享内存段名字，由`ftok`函数规定获取
+>
+> `size`：共享内存大小
+>
+> `shmflg`：由九个权限标志构成，它们的用法和创建文件时使用的`mode`模式标志是一样的，取值为IPC_CREAT：共享内存不存在，创建并返回；共享内存已存在，获取并返回。取值为`IPC_CREAT | IPC_EXCL`共享内存不存在，创建并返回；共享内存已存在，出错返回。
+>
+> `返回值`：成功则返回一个非负整数，即该共享内存段的标识码；失败返回-1。
 
+- `shmat`函数
 
+> 功能：将共享内存段连接到进程地址空间
+>
+> 原型：
+>
+> ```C++
+> void *shmget(int shm_id, const void *shmaddr, int shmflg);
+> ```
+>
+> 参数：
+>
+> `shm_id`：共享内存标识
+>
+> `shmaddr`：指定连接的地址
+>
+> `shmflg`：它的两个可能取值是`SHM_RND`和`SHM_RDONLY`
+>
+> > 说明：
+> >
+> > `shmaddr`为NULL，核心自动选择一个地址
+> >
+> > `shmaddr`不为NULL切`shmflg`无SHM_RND标记，则以`shmaddr`为连接地址
+> >
+> > `shmaddr`不为NULL且`shmflg`设置了SHM_RND标记，则连接的地址回自动向下调整为SHMLBA的整数倍
+> >
+> > 公式：`shmaddr - (shmaddr % SHMLBA)`
+> >
+> > `shmflg = SHM_RDONLY`，表示连接操作用来只读共享内存
+>
+> `返回值`：成功返回一个指针，指向共享内存的第一个节；失败返回-1
 
+- `shmdt`函数
 
+> 功能：将共享内存段与当前进程脱离
+>
+> 原型：
+>
+> ```c++
+> int shmdt(const void *shmaddr);
+> ```
+>
+> 参数：`shmaddr`是由`shmat`返回的指针
+>
+> 返回值：成功返回0；失败返回-1
+>
+> 注意：将共享内存段与当前进程脱离不等于删除共享内存段
 
+- `shmctl`函数
 
+> 功能：用于控制共享内存
+>
+> 原型：
+>
+> ```C++
+> int shmctl(int shmid, int cmd, struct shm_ds *buf);
+> ```
+>
+> 参数：
+>
+> `shmid`：由`shmget`返回的共相内存标识码
+>
+> `cmd`：将要采取的动作（三个可取值）
+>
+> | 命令     | 说明                                                         |
+> | -------- | ------------------------------------------------------------ |
+> | IPC_STAT | 把shmid_ds结构中的数据设置为共享内存的当前关联值             |
+> | IPC_SET  | 在进程由足够权限的前提下，把共享内存的当前关联值设置为shmid_ds数据结构中给出的值 |
+> | IPC_EMID | 删除共享内存段                                               |
+>
+> `buf`：指向一个保存着共享内存的模式状态和访问权限的数据结构
+>
+> 返回值：成功返回0；失败返回-1
 
+#### 基于system V共享内存的进程间通信
 
+在这个项目中只有一个类`Shm`且只有一个方法就是获取共享内存的地址，也就是调用了函数`shmat`并返回。其他的方法都被封装到了构造函数和析构函数中。用户只需要在初始化阶段传入一个参数用于指明`server`或`client`即可。
 
+另外，在此项目中，还使用了命名管道（被修改过的命名管道类）进行进程间通信的第二信道，`client`进程结束前，会通过第二信道发送一条指令，`server`在收到指令后会跳出循环，调用类的析构函数，结束进程。
 
+详情可参考代码：[25/Share_memery · 钦某/Code - 码云 - 开源中国 (gitee.com)](https://gitee.com/wang-qin928/cpp/tree/master/25/Share_memery)
 
-
-
-
+需要注意的是：共享内存不像管道那样，由同步和互斥机制，这也会导致缺乏控制，会带来并发问题，但是有缺点就有优点，它快啊！
