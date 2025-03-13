@@ -306,15 +306,90 @@ Standard signals
 
 - 提供一个信号处理函数，要求内核在处理该信号是切换到用户态执行这个处理函数，这种方式称为自定义捕捉`catch`信号
 
-
+接下来我们将从产生信号，保存信号，捕捉信号三个方面来具体总结。
 
 ## 产生信号
 
 ### 通过终端按键产生信号
 
+基本操作：
+
+- `Ctrl + C`向前台进程发送`SIGINT`信号
+- `Ctrl + \`发送终止信号`SIGQUIT`并生成core dump文件，用于事后调试。
+- `Ctrl + Z`发送停止信号`SIGTSTP`将当前前台进程挂起到后台等待。
+
+ok这里就有一个问题了。键盘按下对应组合键是如何使进程进行对应操作的呢？键盘等硬件是直接或间接的与`CPU`上的针脚连接的，当按键按下，硬件发送一个中断给`CPU`，`CPU`识别到中断信息（高电平）然后就去执行处理硬件数据的代码。从操作系统来看就是`OS`停下当前工作将数据从硬件读取到内存。
+
+那么，信号就是从纯软件的角度来模拟硬件中断。硬件中断是发给`CPU`软中断是发给进程。两者在思想上是完全一致的。
+
+### 调用系统命令向进程发送信号
+
+示例代码
+
+```
+
+```
+
+
+
 ### 使用函数产生信号
 
+#### kill
+
+我们在终端使用的`kill`命令本质也是进程，也是用C语言写的。底层也是调用的这个`kill`函数。kill函数会给一个指定的进程发送指定的信号
+
+```
+NAME
+	kill - send signal to a process
+SYNOPSIS
+	#include <sys/type.h>
+	#include <signal.h>
+	int kill(pid_t pid, int sig);
+RETURN VALUE
+	On success (at least one signal was sent) zero is returned. On erroe, -1 is returned, and errno is set 
+	appropriately.
+```
+
+**mykill**
+
+```
+// 实现自己的kill命令
+```
+
+
+
+#### raise
+
+`raise`函数可以给当前进程发送指定的信号，也就是给自己发信号。
+
+```
+NAME 
+	raise
+```
+
+
+
+#### abort
+
+`abort`函数使当前进程收到信号而异常终止，它总会成功的就像`exit`一样
+
+```
+NAME 
+	abort
+```
+
+
+
 ### 由软件产生信号
+
+`SIGPIPE`和`SIGALRM`信号是一种由软件产生的信号，管道我们已经学过了。现在来学习时钟信号`alarm`函数
+
+```
+NAME
+	alarm
+```
+
+
 
 ### 硬件异常产生信号
 
