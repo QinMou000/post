@@ -763,6 +763,30 @@ int sigismember(const sigset_t *set, int signo);
 
 #### sigprocmask
 
+函数`sigprocmask`可以读取或更改进程的信号屏蔽字`block`
+
+```C++
+#include <signal.h>
+int sigprocmask(int how, const sigset_t *set, sigset_t *oset);
+// 返回值：成功返回0，出错返回-1
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #### sigpending
 
 ## 捕捉信号
