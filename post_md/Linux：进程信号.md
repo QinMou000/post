@@ -738,11 +738,11 @@ struct sigpending
 };
 ```
 
-#### sigset_t
+### sigset_t
 
 从上图来看，每个信号只有⼀个bit的未决标志，⾮0即1, 不记录该信号产生了多少次,阻塞标志也是这样表表示的。因此，未决和阻塞标志可以用相同的数据类型`sigset_t`来存储，`sigset_t`称为信号集, 这个类型可以表示每个信号的“有效”或“无效”状态，在阻塞信号集中“有效”和“无效”的含义是该信号是否被阻塞，⽽在未决信号集中“有效”和“无效”的含义是该信号是否处于未决状态。阻塞信号集也叫做当前进程的信号屏蔽字`Signal Mask`这里的“屏蔽”应该理解为阻塞而不是忽略。
 
-#### 信号集操作函数
+### 信号集操作函数
 
 `sigset_t`类型对于每种信号⽤⼀个`bit`表⽰“有效”或“无效”状态, 至于这个类型内部如何存储这些`bit`则依赖于系统实现，从使用者的角度是不必关心的，使用者只能调⽤以下函数来操作`sigset_` t变量，而不应该对它的内部数据做任何解释，**比如用`printf`直接打印`sigset_t`变量是没有意义的。**
 
@@ -761,7 +761,7 @@ int sigismember(const sigset_t *set, int signo);
 
 这四个函数都是成功返回0，出错返回-1。`sigismember`是⼀个布尔函数，⽤于判断⼀个信号集的有效信号中是否包含某种信号，若包含则返回1，不包含则返回0，出错返回-1。
 
-#### sigprocmask
+### sigprocmask
 
 函数`sigprocmask`可以读取或更改进程的信号屏蔽字`block`
 
@@ -771,25 +771,401 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oset);
 // 返回值：成功返回0，出错返回-1
 ```
 
+如果`oset`指针非空，则读取进程的当前信号屏蔽字通过`oset`传出。如果`set`非空，则更改进程的信号屏蔽字，参数`how`指示如何修改。如果`oset`和`set`均非空，则将进程的原来的信号屏蔽字备份到`oset`并根据`set`和`how`修改信号屏蔽字。假设当前信号屏蔽字为`mask`下标说明了`how`参数的可选值
 
+| **SIG_BLOCK**   | **`set`包含了我们希望添加到当前信号屏蔽字的信号，相当于`mask = mask | set`** |
+| --------------- | ------------------------------------------------------------ |
+| **SIG_UNBLOCK** | **`set`包含了我们希望从当前信号屏蔽字种解除阻塞的信号，相当于`mask = mask  & ~set`** |
+| **SIG_SETMASK** | **设置当前信号屏蔽字为`set`指向的值，相当于`mask = set`**    |
 
+POSIX 标准规定，**在 `sigprocmask` 返回前**，内核必须确保至少有一个未决信号被递达。换句话说，解除阻塞后，内核会立即检查未决信号，并处理至少一个。
 
+- **及时性**：确保信号不会被无限期延迟。如果解除阻塞后不立即递达，未决信号可能被后续的信号掩码操作重新阻塞。
+- **原子性**：`sigprocmask` 的调用是原子的，即解除阻塞和递达信号的过程不可被中断。
 
+### sigpending
 
+```C++
+#include <signal.h>
+int sigpending(sigset_t *set);
 
-
-
-
-
-
-
-
-
-
-
-#### sigpending
+读取当前进程的未决信号集，通过set传出
+调用成功返回0，出错返回-1
+```
 
 ## 捕捉信号
+
+### 信号捕捉的流程
+
+![image-20250320210952737](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250320210952737.png)
+
+如果信号的处理动作是用户的自定义函数在信号递达时就调用这个函数，这个叫做捕捉信号。
+
+处理信号的代码在用户空间，而信号的保存是在内核里面，所以这里就涉及到内核与用户的转换了
+
+- 用户程序注册了`SIG_INT`信号的处理函数`sighandler`。
+
+- 当前执行`main`函数，在程序收到信号时，发生中断，陷入内核，中断处理完后发现`pending`表里面有信号`SIG_INT`递达。
+- 内核返回用户态，但不是恢复`main`函数的上下文继续执行，而是执行`sighandler`函数，`sighandler`和`main`函数在不同的堆栈空间，不存在调用或被调用关系，是两个独立的控制流。
+- `sighandler`函数返回后自动执行特殊的系统调用`sigreturn`再次进入内核态。
+- 如果没有新的信号要递达，这次再返回用户态就是恢复`main`函数的上下文执行了。
+
+我们把这个过程图抽象一下，就是数学里的无穷符号
+$$
+\infty
+$$
+![image-20250320212625606](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250320212625606.png)
+
+### sigaction
+
+```C++
+#include <signal.h>
+int sigaction(int signo, const struct sigaction *act, struct sigaction *oact);
+```
+
+- `sigaction`函数可以读取和修改与指定信号相关的处理动作。调用成功则返回0，出错则返回-1。`signo`指信号编号。若`act`非空，则根据`act`修改该信号的编号，若`oact`非空则通过`oact`传出该信号原来的处理动作。`act`和`oact`都指向`sigaction`结构体：
+
+  ```C++
+  // linux kernel 2.6.18
+  struct sigaction {
+  	__sighandler_t sa_handler;
+  	unsigned long sa_flags;
+  	__sigrestore_t sa_restorer;
+  	sigset_t sa_mask;		/* mask last for extensibility */
+  };
+  ```
+
+- 将`sa_handler`赋值为常数`SIG_IGN`传给`sigaction`表示忽略信号，赋值为`SIG_DFL`表示为执行系统默认动作，赋值为一个函数指针表明用自定义函数捕捉信号，或者说向内核注册了一个信号处理函数，该函数返回值为`void`，一个`int`参数表示信号编号。显然这也是回调，不是被`main`回调，而是操作系统。
+
+当某个信号的处理函数被调用时，进程会自动将当前信号加入当前进程的信号屏蔽字里，当前信号处理函数返回时自动恢复到原来的信号屏蔽字。确保在处理某个信号时，如果这种信号再次产生，那么它就会被阻塞到这个信号处理完为止。如果在调用信号处理函数时。除了当前信号被自动屏蔽外，还希望系统屏蔽另外一些信号，则用`sa_mask`字段说明这些需要额外屏蔽的信号，当信号处理函数返回时自动恢复原来的信号屏蔽字。`sa_flag`字段包含一些选项，其作用是通过不同的标志位来指定信号处理的一些特殊行为。
+
+> ### `SA_NOCLDWAIT`
+>
+> 若信号为 `SIGCHLD`，同时设置了 `SA_NOCLDWAIT` 标志，在子进程终止时，系统不会将其转变为僵尸进程。这意味着父进程无需调用 `wait()` 或者 `waitpid()` 来回收子进程的资源。
+>
+> ### `SA_NODEFER`
+>
+> 此标志表明在信号处理函数执行期间，不会自动阻塞当前正在处理的信号。一般而言，当进程正在处理某个信号时，内核会自动阻塞该信号，防止信号的嵌套处理。若设置了 `SA_NODEFER` 标志，那么在信号处理函数执行期间，相同的信号仍能被接收和处理。
+
+### 操作系统是怎么运行的
+
+#### 硬件中断
+
+![image-20250320221835066](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250320221835066.png)
+
+中断向量表是操作系统的一部分，启动后自动加载到内存。
+
+通过外部中断，操作系统就不需要对外设进行任何周期性的检测轮询。外部设备准备好了就发送中断，CPU收到中断号，对应去执行中断向量表里面的方法。等等，这一幕似曾相识，外设发送的中断好像信号啊，中断向量表也有点类似于`handler`表。这里面的思想都是一样的
+
+由外部系统触发的，中断系统运行流程，叫做硬件中断。
+
+```c++
+// linux kernel 1.0
+void trap_init(void)
+{
+	int i;
+
+	set_trap_gate(0,&divide_error);// 设置除操作出错的中断向量值。以下雷同。
+	set_trap_gate(1,&debug);
+	set_trap_gate(2,&nmi);
+	set_system_gate(3,&int3);	/* int3-5 can be called from all */
+	set_system_gate(4,&overflow);
+	set_system_gate(5,&bounds);
+	set_trap_gate(6,&invalid_op);
+	set_trap_gate(7,&device_not_available);
+	set_trap_gate(8,&double_fault);
+	set_trap_gate(9,&coprocessor_segment_overrun);
+	set_trap_gate(10,&invalid_TSS);
+	set_trap_gate(11,&segment_not_present);
+	set_trap_gate(12,&stack_segment);
+	set_trap_gate(13,&general_protection);
+	set_trap_gate(14,&page_fault);
+	set_trap_gate(15,&reserved);
+	set_trap_gate(16,&coprocessor_error);// 下⾯将int17-48 的陷阱⻔先均设置为reserved，以后每个硬件初始化时会重新设置⾃⼰的陷阱⻔。
+	set_trap_gate(17,&alignment_check);
+	for (i=18;i<48;i++)
+		set_trap_gate(i,&reserved);
+}
+```
+
+#### 时钟中断
+
+进程可以在操作系统的指挥下被调度被执行，那操作系统自己被谁推动执行？外设虽然可以自己或通过用户发送中断，那有没有可以自己定时发送中断的设备呢？有的兄弟有的！！！
+
+时钟源现在已经被集成在了`CPU`内部，我们通常说，`CPU`的主频是多少，在某种程度上就是`CPU`内部的时钟源的频率。在架构和核心数量相同的情况下，主频越高，CPU 每秒钟能调度的进程就越多。（时钟源频率和主频并不相等，中间有转换公式`主频 = 时钟源频率 × 倍频系数`）
+
+![image-20250320224440540](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250320224440540.png)
+
+现在操作系统什么都不需要做，在时钟中断的推动下，自动调度进程。
+
+```C++
+// Linux 内核0.11
+// main.c
+sched_init(); // 调度程序初始化(加载了任务0 的tr, ldtr) （kernel/sched.c）
+
+// 调度程序的初始化⼦程序。
+void sched_init(void)
+{
+    ... 
+    set_intr_gate(0x20, &timer_interrupt);
+    // 修改中断控制器屏蔽码，允许时钟中断。
+    outb(inb_p(0x21) & ~0x01, 0x21);
+    // 设置系统调⽤中断⻔。
+    set_system_gate(0x80, &system_call);
+    ...
+}
+
+// system_call.s
+_timer_interrupt : 
+    ...
+; // do_timer(CPL)执⾏任务切换、计时等⼯作，在kernel/shched.c,305 ⾏实现。
+    call _do_timer;         // 'do_timer(long CPL)' does everything from
+
+// 调度⼊⼝
+void do_timer(long cpl)
+{
+    ... 
+    schedule();
+}
+void schedule(void)
+{
+    ... 
+    switch_to(next); // 切换到任务号为next 的任务，并运⾏之。
+}
+
+```
+
+#### 死循环
+
+如果有了时钟中断，操作系统不就可以什么都不做了吗，需要什么功能就向中断向量表里加方法。操作系统的本质就是死循环。
+
+```C++
+// linux kernel 0.11
+void main(void) /* 这⾥确实是void，并没错。 */
+{               /* 在startup 程序(head.s)中就是这样假设的。 */
+    ...
+        /*
+         * 注意!! 对于任何其它的任务，'pause()'将意味着我们必须等待收到⼀个信号才会返
+         * 回就绪运⾏态，但任务0（task0）是唯⼀的意外情况（参⻅'schedule()'），因为任
+         * 务0 在任何空闲时间⾥都会被激活（当没有其它任务在运⾏时），
+         * 因此对于任务0'pause()'仅意味着我们返回来查看是否有其它任务可以运⾏，如果没
+         * 有的话我们就回到这⾥，⼀直循环执⾏'pause()'。
+         */
+        for (;;)
+            pause();
+} // end main
+
+// linux kernel 1.0 
+asmlinkage void start_kernel(void)
+{
+    ...
+	trap_init();
+	init_IRQ();
+	sched_init();
+	buffer_init();
+	time_init();
+	floppy_init();
+	sock_init();
+    ...
+/*
+ * task[0] is meant to be used as an "idle" task: it may not sleep, but
+ * it might do some general things like count free pages or it could be
+ * used to implement a reasonable LRU algorithm for the paging routines:
+ * anything that can be useful, but shouldn't take time from the real
+ * processes.
+ *
+ * Right now task[0] just does a infinite idle loop.
+ */
+	for(;;)
+		idle();
+}
+```
+
+所以，`CPU`每隔一段时间（时钟中断频率）对当前进程的时间片减减，减到零，将当前进程放入等待队列，从执行队列里拿一个进程过来执行。这不就是进程调度吗~。所以为什么主频越快，`CPU`越快，也是因为这个。
+
+#### 软中断
+
+上述的中断都是由硬件触发，那么有没有由软件触发的中断呢？有的兄弟有的！！！
+
+为了让操作系统支持进行系统调用，`CPU`也设计了对应的汇编指令（`int` 或者 `syscall`）可以让`CPU`内部触发中断逻辑，只需要再在中断向量表中加方法就行啦。
+
+![image-20250320231200043](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250320231200043.png)
+
+用户通过寄存器将系统调用号传给操作系统，操作系统也通过寄存器或用户提供的缓冲区地址返回值。
+
+系统调用的过程就是，操作系统先`int 0x80`或者`syscall`陷入内核，本质就是触发软中断，`CPU`自动执行系统调用的处理方法。而这个方法会根据系统调用号，自动查表，执行方法。系统调用号的本质就是数组下标。
+
+```C++
+// linux kernel 1.0
+// sys.h
+extern int sys_setup();         /* 0 */
+extern int sys_exit();
+extern int sys_fork();
+extern int sys_read();
+extern int sys_write();
+extern int sys_open();          /* 5 */
+extern int sys_close();
+extern int sys_waitpid();
+extern int sys_creat();
+extern int sys_link();
+extern int sys_unlink();        /* 10 */
+extern int sys_execve();
+extern int sys_chdir();
+extern int sys_time();
+extern int sys_mknod();
+extern int sys_chmod();         /* 15 */
+extern int sys_chown();
+extern int sys_break();
+extern int sys_stat();
+extern int sys_lseek();
+extern int sys_getpid();        /* 20 */
+extern int sys_mount();
+extern int sys_umount();
+extern int sys_setuid();
+extern int sys_getuid();
+extern int sys_stime();         /* 25 */
+extern int sys_ptrace();
+extern int sys_alarm();
+extern int sys_fstat();
+extern int sys_pause();
+extern int sys_utime();         /* 30 */
+extern int sys_stty();
+extern int sys_gtty();
+extern int sys_access();
+extern int sys_nice();
+extern int sys_ftime();         /* 35 */
+extern int sys_sync();
+extern int sys_kill();
+extern int sys_rename();
+extern int sys_mkdir();
+extern int sys_rmdir();         /* 40 */
+extern int sys_dup();
+extern int sys_pipe();
+extern int sys_times();
+extern int sys_prof();
+extern int sys_brk();           /* 45 */
+extern int sys_setgid();
+extern int sys_getgid();
+extern int sys_signal();
+extern int sys_geteuid();
+extern int sys_getegid();       /* 50 */
+extern int sys_acct();
+extern int sys_phys();
+extern int sys_lock();
+extern int sys_ioctl();
+extern int sys_fcntl();         /* 55 */
+extern int sys_mpx();
+extern int sys_setpgid();
+extern int sys_ulimit();
+extern int sys_uname();
+extern int sys_umask();         /* 60 */
+extern int sys_chroot();
+extern int sys_ustat();
+extern int sys_dup2();
+extern int sys_getppid();
+extern int sys_getpgrp();       /* 65 */
+extern int sys_setsid();
+extern int sys_sigaction();
+extern int sys_sgetmask();
+extern int sys_ssetmask();
+extern int sys_setreuid();      /* 70 */
+extern int sys_setregid();
+extern int sys_sigpending();
+extern int sys_sigsuspend();
+extern int sys_sethostname();
+extern int sys_setrlimit();     /* 75 */
+extern int sys_getrlimit();
+extern int sys_getrusage();
+extern int sys_gettimeofday();
+extern int sys_settimeofday();
+extern int sys_getgroups();     /* 80 */
+extern int sys_setgroups();
+extern int sys_select();
+extern int sys_symlink();
+extern int sys_lstat();
+extern int sys_readlink();      /* 85 */
+extern int sys_uselib();
+extern int sys_swapon();
+extern int sys_reboot();
+extern int sys_readdir();
+extern int sys_mmap();          /* 90 */
+extern int sys_munmap();
+extern int sys_truncate();
+extern int sys_ftruncate();
+extern int sys_fchmod();
+extern int sys_fchown();        /* 95 */
+extern int sys_getpriority();
+extern int sys_setpriority();
+extern int sys_profil();
+extern int sys_statfs();
+extern int sys_fstatfs();       /* 100 */
+extern int sys_ioperm();
+extern int sys_socketcall();
+extern int sys_syslog();
+extern int sys_getitimer();
+extern int sys_setitimer();     /* 105 */
+extern int sys_newstat();
+extern int sys_newlstat();
+extern int sys_newfstat();
+extern int sys_newuname();
+extern int sys_iopl();          /* 110 */
+extern int sys_vhangup();
+extern int sys_idle();
+extern int sys_vm86();
+extern int sys_wait4();
+extern int sys_swapoff();       /* 115 */
+extern int sys_sysinfo();
+extern int sys_ipc();
+extern int sys_fsync();
+extern int sys_sigreturn();
+extern int sys_setdomainname(); /* 120 */
+extern int sys_olduname();
+extern int sys_old_syscall();
+extern int sys_modify_ldt();
+extern int sys_adjtimex();
+extern int sys_mprotect();      /* 125 */
+extern int sys_sigprocmask();
+extern int sys_create_module();
+extern int sys_init_module();
+extern int sys_delete_module();
+extern int sys_get_kernel_syms(); /* 130 */
+extern int sys_quotactl();
+extern int sys_getpgid();
+extern int sys_fchdir();
+extern int sys_bdflush();
+
+/*
+ * These are system calls that will be removed at some time
+ * due to newer versions existing..
+ */
+
+// 系统调⽤函数指针表。⽤于系统调⽤中断处理程序(int 0x80)，作为跳转表。
+fn_ptr sys_call_table[] = { sys_setup, sys_exit, sys_fork, sys_read,
+    sys_write, sys_open, sys_close, sys_waitpid, sys_creat, sys_link,
+    sys_unlink, sys_execve, sys_chdir, sys_time, sys_mknod, sys_chmod,
+    sys_chown, sys_break, sys_stat, sys_lseek, sys_getpid, sys_mount,
+    sys_umount, sys_setuid, sys_getuid, sys_stime, sys_ptrace, sys_alarm,
+    sys_fstat, sys_pause, sys_utime, sys_stty, sys_gtty, sys_access,
+    sys_nice, sys_ftime, sys_sync, sys_kill, sys_rename, sys_mkdir,
+    sys_rmdir, sys_dup, sys_pipe, sys_times, sys_prof, sys_brk, sys_setgid,
+    sys_getgid, sys_signal, sys_geteuid, sys_getegid, sys_acct, sys_phys,
+    sys_lock, sys_ioctl, sys_fcntl, sys_mpx, sys_setpgid, sys_ulimit,
+    sys_uname, sys_umask, sys_chroot, sys_ustat, sys_dup2, sys_getppid,
+    sys_getpgrp, sys_setsid, sys_sigaction, sys_sgetmask, sys_ssetmask,
+    sys_setreuid, sys_setregid
+};
+```
+
+- 我们使用的系统调用本质是由`c标准库`对下层的封装，所以我们没有见过`int 0x80`、`syscall`。
+- 当操作系统发生缺页中断，处理内存碎片，除零野指针错误都会转化为`CPU`内部软中断，走中断处理流程，在系统调用函数指针表中都有对应的处理方法。
+- 操作系统就是躺在中断处理例程上的代码块。操作系统就是基于各种中断运行的！！！
+- `CPU`内部的软中断，`int 0x80`、`syscall`，我们叫做陷阱。`CPU`内部的软中断，除零、野指针，我们叫做异常
+
+#### 再谈用户态内核态
+
+
+
+
 
 
 
