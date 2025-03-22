@@ -1,5 +1,7 @@
 > # LeetCode_从数量最多的堆取走礼物[2558]
->
+
+[[LeetCode_栈和队列Stacksqueues相关OJ-]]
+
 >  ![img](https://raw.githubusercontent.com/QinMou000/pic/main/6f2b920cd38b273e9349974209147fee.png)![点击并拖拽以移动](data:image/gif;base64,R0lGODlhAQABAPABAP///wAAACH5BAEKAAAALAAAAAABAAEAAAICRAEAOw==)编辑
 >
 > ✨✨所属专栏：[LeetCode刷题专栏](https://blog.csdn.net/2301_80194476/category_12596977.html?spm=1001.2014.3001.5482)✨✨
