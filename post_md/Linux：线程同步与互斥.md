@@ -501,7 +501,7 @@ private:
 
 > 给条件发送信号代码：
 >
-> ```
+> ```C++
 > pthread_mutex_lock(&mutex);
 > 将条件变为真
 > pthread_cond_signal(cond);
@@ -510,7 +510,154 @@ private:
 
 ## POSIX信号量
 
+POSIX信号量和SystemV信号量作用相同，用于同步操作，达到无冲突的访问共享资源的目的。但POSIX可以用于线程间同步。
 
+> 初始化信号量
+>
+> ```C++
+> #include <semaphore.h>
+> int sem_init(sem_t *sem, int pshared, usigned int value);
+> 参数：
+> 	pshared：0表示线程间共享，非零表示进程间共享
+> 	value：信号量初始值
+> ```
+
+> 销毁信号量
+>
+> ```C++
+> int sem_destroy(sem_t *sem);
+> ```
+
+> 等待信号量
+>
+> ```C++
+> 功能：等待信号量，会将信号量的值减一
+> int sem_wait(sem_t *sem); // P操作
+> ```
+
+> 发布信号量
+>
+> ```C++
+> 功能：发布信号量，表示资源使用完毕，可以归还资源了。将信号量加一
+> int sem_post(sem_t *sem); // V操作
+> ```
+
+### 基于环形队列的生产消费者模型
+
+![image-20250518201422072](https://raw.githubusercontent.com/QinMou000/pic/main/image-20250518201422072.png)
+
+环形结构的起始状态和结束状态都是一样的，不好判断为空，为满，所以可以通过加计数器或者标记位来判断满或者空。另外也可以预留一个空的位置，`tail == head`为空 `tail + 1 == head`为满
+
+现在我们可以用信号量，可以让生产者和消费者同时访问循环队列的不同位置，其本质就是一个计数器，实现多线程间同步，
+
+#### 封装信号量
+
+```C++
+#pragma once
+
+#include <semaphore.h>
+
+const int defalut = 1;
+class Sem
+{
+public:
+    Sem(unsigned int sem_value = defalut)
+    {
+        sem_init(&_sem, 0, sem_value); // 第二个参数为零则在线程间共享，第三个参数指定信号量的初始值
+    }
+    void P() // P(Proberen)操作 对信号量计数器--,申请资源
+    {
+        sem_wait(&_sem); // 本身是原子的
+    }
+    void V() // V(Verhogen)操作 对信号量计数器++，释放资源
+    {
+        sem_post(&_sem); // 本身是原子的
+    }
+    ~Sem()
+    {
+        sem_destroy(&_sem);
+    }
+private:
+    sem_t _sem;
+};
+```
+
+需要注意的是对于生产者的资源就是空位置，对于消费者资源就是有资源的位置个数。另外为了支持多生产多消费，除了要靠信号量维持生产者和消费者之间的同步关系，还需要维持c与c之间和p与p之间的互斥关系，所以要再加两把锁。
+
+```C++
+#pragma once
+#include "sem.hpp"
+#include "mutex.hpp"
+#include <vector>
+#include <iostream>
+
+const int default_len = 5; // 默认循环队列长度
+
+template <class T>
+class RingQueue
+{
+public:
+    RingQueue(int len = default_len)
+        : _rq(len),
+          _cap(len),
+          _c_step(0),
+          _data_sem(0),
+          _p_step(0),
+          _blank_sem(_cap)
+    {
+    }
+    void Equeue(T &in) // 生产者调用
+    {
+        _blank_sem.P(); // 申请资源
+        {
+            global_mutex glock(_p_lock); // 可以先让一批线程竞争信号量，再来竞争锁，后来的线程，就挂在信号量上
+            _rq[_p_step] = in;
+            _p_step++;
+            _p_step %= _cap;
+        }
+        _data_sem.V(); // 对消费者资源++；
+    }
+    T Pop() // 消费者调用
+    {
+        T data;
+        _data_sem.P(); // 申请资源
+        {
+            global_mutex glock(_c_lock);
+            data = _rq[_c_step];
+            _c_step++;
+            _c_step %= _cap;
+        }
+        _blank_sem.V(); // 对生产者资源++
+        return data;
+    }
+    ~RingQueue()
+    {
+    }
+
+private:
+    std::vector<T> _rq; // 用vector来模拟循环队列
+    int _cap;           // 标记长度，用来模等，维持循环属性
+
+    int _c_step;   // 消费者位置
+    Sem _data_sem; // 记录对于消费者来说的资源，也就是有数据的位置数
+
+    int _p_step;    // 生产者位置
+    Sem _blank_sem; // 记录对于生产者来说的资源，也就是空位置数
+
+    // 为了支持多生产多消费，需要再加两把锁维持p与p，v与v之间的互斥关系
+    Mutex _c_lock;
+    Mutex _p_lock;
+};
+
+```
+
+## 线程池
+
+### 日志与策略模式
+
+### 线程池设计
+
+### 线程安全的单例模式
 
 
 
