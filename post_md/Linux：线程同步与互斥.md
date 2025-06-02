@@ -704,31 +704,198 @@ private:
 
 **总结：**
 
-- 
-
-
+- 这个线程池的类不算单例，我觉得重要的方法有以下几个
+- 构造，当然是轮询新建几个线程放入线程队列里，将类中的`handler`方法传入，方便之后执行线程时线程从任务队列里面取任务
+- `Start`，轮询启动线程队列里的线程，这个很简单但很重要，没什么好说的
+- `Handler`和`Equeue`，当线程池`Start`之后，各个线程就执行到`Handler`里面了，线程就需要开始处理任务了，为了保证同步，需要互斥锁，在没有任务时，线程会都在条件变量下等，等到`Equeue`后任务队列被`push`任务后，某一个线程被唤醒，取出任务，执行任务
+- **单例模式**，为了实现单例模式，我们首先需要将构造函数和`Start`私有，此外，类中还需要一个单例指针，这个指针是`static`的，也就是说整个文件只有这一个指针，默认为空，当有线程第一次调用`GetInstance`时，我们`new`一个线程池对象给这个单例指针。当然这其中要保证在多线程调用时不会出现错误。所以保证同步，还需使用一个互斥锁，也是`static`的
 
 ### 线程安全的单例模式
 
+用一个洗碗的例子来形象的解释饿汉和懒汉
+
+- 饿汉：吃完饭立刻洗碗，下一顿时可以直接拿着碗就吃饭
+- 懒汉：吃完饭不着急洗碗，等到下一顿饭要用这个碗再洗碗
+
+#### 饿汉方式和懒汉方式实现单例
+
+饿汉
+
+```C++
+template <typename T>
+class Singleton {
+    static T data; // 类中本来就有这样一个数据，你要直接给你
+public:		      // 只要通过Singleton这个包装类来使用T对象，则一个进程中只有一个T对象实例
+    static T* GetInstance() {
+        return &data;
+    }
+};
+```
+
+懒汉
+
+```C++
+template <typename T>
+class Singleton {
+    static T* inst; // 类中只有这个类类型的指针，在你需要的时候再去new
+public:
+    static T* GetInstance() {
+        if (inst == NULL) {
+            inst = new T();
+        }
+        return inst;
+    }
+};
+```
+
+这样的方式明显存在线程安全问题，第一次调用`GetInstance`时，如果两个线程同时调用，可能会`new`出两个`T`对象实例，所以需要锁
+
+```C++
+// 懒汉模式, 线程安全
+template <typename T>
+class Singleton {
+    volatile static T* inst; // 需要设置 volatile 关键字, 否则可能被编译器优化
+    static std::mutex lock;
+public:
+    static T* GetInstance() {
+        if (inst == NULL) { // 双重判定空指针, 降低锁冲突的概率, 提高性能
+            lock.lock(); // 使用互斥锁, 保证多线程情况下也只调用一次 new
+            if (inst == NULL) {
+                inst = new T();
+            }
+            lock.unlock();
+        }
+        return inst;
+    }
+};
+```
+
+## 线程安全和重入问题
+
+### 概念
+
+线程安全：就是多个线程在访问共享资源时能够正确的执行，不会相互干扰或破环彼此的执行结果。一般而言，多个线程并发同一段只有局部变量的代码时，不会出现不同的结果。但是对全局变量或者静态变量进行操作，并且没有锁保护的情况下，容易出现该问题
+
+重入：同一个函数被不同的执行流调用，当前执行流还没有执行完，就有了其他执行流再次进入，称为重入。一个函数在重入的情况下，运行结果不会出现任何不同或者问题，称该函数为可重入函数，否则称为不可重入问题。
+
+**根据现在我们的理解将重入分为两种情况**
+
+1. 多线程重入
+2. 当程序执行时，若收到一个信号（如键盘中断`SIGINT`），系统会暂停当前执行流，转而执行信号处理函数。如果信号处理函数中调用了当前正在执行的函数，就会导致**信号重入**（同一执行流被中断后再次进入同一函数）。
+
+**常见线程不安全的情况**
+
+- 不保护共享变量的函数
+- 函数状态随着被调用发生变化的函数
+- 返回指向静态变量指针的函数
+- 调用线程不安全的函数
+
+**常见不可重入的情况**
+
+- 调用了malloc/free函数，malloc是使用全局链表来管理堆的
+- 调用了标准I/O库的很多实现都以不可重入的方式使用全局数据结构
+- 可重入函数内部使用了静态的数据结构
+
+**函数是可重入的，那就是线程安全的；** **如果函数是线程安全的，不一定是可重入的。**
+
+## 常见锁概念
+
+### 死锁
+
+死锁是指在一组进程中的各个进程均占有不会释放的资源，但因互相申请被其他进程占用不会释放的资源而处于的一种永久的等待状态
+
+方便描述，假设线程A，线程B必须同时持有锁1和锁2才能访问后续资源
+
+申请一把锁是原子的，但是同时申请两把锁就有可能，A线程申请了锁1，B线程申请了锁2，他们谁也不让着谁，就造成了死锁
+
+### 死锁的四个必要条件
+
+- 互斥条件：一个资源每次只能被一个执行流使用
+- 请求与保持条件：一个执行流因请求资源而阻塞时，对以获得的资源不释放
+- 不剥夺条件：一个执行流已获得的资源，在未使用完之前不能强行剥夺
+- 循环等待条件：若干执行流之前形成一种头尾相接的循环等待资源关系
+
+### 避免死锁
+
+- 破环循环等待条件问题：资源一次性分配，使用超时机制、加锁顺序一致、避免锁未释放的场景
+
+```C++
+#include <iostream>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <unistd.h>
+// 定义两个共享资源（整数变量）和两个互斥锁
+int shared_resource1 = 0;
+int shared_resource2 = 0;
+std::mutex mtx1, mtx2;
+// ⼀个函数，同时访问两个共享资源
+void access_shared_resources()
+{
+    // std::unique_lock<std::mutex> lock1(mtx1, std::defer_lock);
+    // std::unique_lock<std::mutex> lock2(mtx2, std::defer_lock);
+    // // 使用 std::lock 同时锁定两个互斥锁
+    // std::lock(lock1, lock2);
+    // 现在两个互斥锁都已锁定，可以安全地访问共享资源
+    int cnt = 10000;
+    while (cnt)
+    {
+        ++shared_resource1;
+        ++shared_resource2;
+        cnt--;
+    }
+    // 当离开 access_shared_resources 的作⽤域时，lock1 和 lock2 的析构函数会被自动调用
+    // 这会导致它们各⾃的互斥量被⾃动解锁
+}
+// 模拟多线程同时访问共享资源的场景
+void simulate_concurrent_access()
+{
+    std::vector<std::thread> threads;
+        // 创建多个线程来模拟并发访问
+        for (int i = 0; i < 10; ++i)
+        {
+            threads.emplace_back(access_shared_resources);
+        }
+    // 等待所有线程完成
+    for (auto &thread : threads)
+    {
+        thread.join();
+    }
+    // 输出共享资源的最终状态
+    std::cout << "Shared Resource 1: " << shared_resource1 << std::endl;
+    std::cout << "Shared Resource 2: " << shared_resource2 << std::endl;
+}
+int main()
+{
+    simulate_concurrent_access();
+    return 0;
+}
+```
+`std::defer_lock` 表示创建锁对象时不立即加锁。
+
+`std::lock(lock1, lock2)` 以原子方式同时锁定多个锁，避免死锁。
 
 
+```bash
+$ ./a.out // 不⼀次申请
+Shared Resource 1: 94416
+Shared Resource 2: 94536
+```
 
+```bash
+$ ./a.out // ⼀次申请
+Shared Resource 1: 100000
+Shared Resource 2: 100000
+```
 
+## STL、智能指针的线程安全
 
+STL中的容器不是线程安全的，因为STL设计初衷是将性能发挥到极致
 
+`unique_ptr`由于只在当前代码块范围内生效，所以不涉及线程安全问题
 
+`shared_ptr`多个对象需要共用一个引用计数，所以是存在线程安全问题的，这个在设计`shared_ptr`的时候也考虑到了，基于原子操作`CAS`的方式保证了`shared_ptr`能够高效、原子的操作引用计数
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+1. **原子操作**：使用 `std::atomic` 确保引用计数的增减操作是原子的。
+2. **控制块唯一性**：通过 `std::call_once` 或等价机制确保同一对象的所有 `shared_ptr` 共用同一个控制块。
+3. **安全的共享接口**：提供 `std::enable_shared_from_this` 确保对象能安全获取自身的 `shared_ptr`。
